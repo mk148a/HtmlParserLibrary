@@ -1,43 +1,29 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using System.Xml;
 using System.Xml.Linq;
 
 namespace HtmlParserLibrary
 {
     public class HtmlParser
     {
-        private string PreprocessHtmlForXml(string htmlContent)
-        {
-            // Self-closing tagleri uygun formatta değiştir
-            htmlContent = Regex.Replace(htmlContent, @"<(\w+)([^>]*)/>", "<$1$2></$1>");
-
-            // '&' karakterini XML uyumlu hale getiriyoruz
-            htmlContent = htmlContent.Replace("&", "&amp;");
-
-            return htmlContent;
-        }
+        private int idCounter = 1; // Initialize a counter for generating unique IDs
 
         public string ConvertHtmlToJson(string htmlContent)
         {
             try
             {
-                // HTML içeriğini önceden işliyoruz
                 string preprocessedHtml = PreprocessHtmlForXml(htmlContent);
-
-                // HTML içeriğini tek bir kök element içine sarıyoruz
                 string wrappedHtmlContent = $"<root>{preprocessedHtml}</root>";
-
-                // XDocument ile parse ediyoruz
                 var document = XDocument.Parse(wrappedHtmlContent);
                 var rootElement = ConvertNodeToJson(document.Root);
                 return JsonSerializer.Serialize(rootElement, new JsonSerializerOptions { WriteIndented = true });
             }
             catch (Exception ex)
             {
-                // XML parse hatası durumunda hatalı içeriği ham haliyle geri döndür
                 return JsonSerializer.Serialize(new
                 {
                     type = "rawHtml",
@@ -47,10 +33,18 @@ namespace HtmlParserLibrary
             }
         }
 
+        private string PreprocessHtmlForXml(string htmlContent)
+        {
+            htmlContent = Regex.Replace(htmlContent, @"<(\w+)([^>]*)/>", "<$1$2></$1>");
+            htmlContent = htmlContent.Replace("&", "&amp;");
+            return htmlContent;
+        }
+
         private dynamic ConvertNodeToJson(XElement element)
         {
             var jsonElement = new
             {
+                id = (idCounter++).ToString("D5"),
                 type = element.Name.LocalName,
                 attributes = element.Attributes().ToDictionary(attr => attr.Name.LocalName, attr => attr.Value),
                 isEditable = IsEditableElement(element),
@@ -59,7 +53,6 @@ namespace HtmlParserLibrary
                         ? ConvertNodeToJson((XElement)node)
                         : (object)node.ToString()).ToList()
             };
-
             return jsonElement;
         }
 
@@ -73,17 +66,8 @@ namespace HtmlParserLibrary
         {
             var jsonObject = JsonSerializer.Deserialize<JsonElement>(jsonContent);
             var htmlBuilder = new StringBuilder();
-
-            // Root elementin içindeki içerikleri direkt olarak işliyoruz
-            if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
-            {
-                foreach (JsonElement child in contentElement.EnumerateArray())
-                {
-                    ConvertJsonToHtmlRecursive(child, htmlBuilder);
-                }
-            }
-
-            return htmlBuilder.ToString();
+            ConvertJsonToHtmlRecursive(jsonObject, htmlBuilder);
+            return Regex.Unescape(htmlBuilder.ToString());
         }
 
         private void ConvertJsonToHtmlRecursive(JsonElement jsonObject, StringBuilder htmlBuilder)
@@ -93,28 +77,31 @@ namespace HtmlParserLibrary
                 if (jsonObject.TryGetProperty("type", out JsonElement typeElement))
                 {
                     string tagName = typeElement.GetString();
-                    var localHtml = new StringBuilder($"<{tagName}");
+                    htmlBuilder.Append($"<{tagName}");
 
                     if (jsonObject.TryGetProperty("attributes", out JsonElement attributesElement))
                     {
                         foreach (JsonProperty attribute in attributesElement.EnumerateObject())
                         {
-                            localHtml.Append($" {attribute.Name}=\"{attribute.Value.GetString()}\"");
+                            htmlBuilder.Append($" {attribute.Name}=\"{attribute.Value.GetString()}\"");
                         }
                     }
-
-                    localHtml.Append(">");
-
+                    htmlBuilder.Append(">");
                     if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
                     {
-                        foreach (JsonElement child in contentElement.EnumerateArray())
+                        if (contentElement.ValueKind == JsonValueKind.Array)
                         {
-                            ConvertJsonToHtmlRecursive(child, localHtml);
+                            foreach (JsonElement child in contentElement.EnumerateArray())
+                            {
+                                ConvertJsonToHtmlRecursive(child, htmlBuilder);
+                            }
+                        }
+                        else if (contentElement.ValueKind == JsonValueKind.String)
+                        {
+                            htmlBuilder.Append(contentElement.GetString());
                         }
                     }
-
-                    localHtml.Append($"</{tagName}>");
-                    htmlBuilder.Append(localHtml.ToString());
+                    htmlBuilder.Append($"</{tagName}>");
                 }
             }
             else if (jsonObject.ValueKind == JsonValueKind.String)
@@ -129,18 +116,19 @@ namespace HtmlParserLibrary
             var processedList = new List<string>();
             var currentChunk = new StringBuilder();
             int chunkCounter = 1;
+            int chunkIndex = 100;
 
-            ProcessJsonRecursive(jsonObject, currentChunk, processedList, chunkCounter);
+            ProcessJsonRecursive(jsonObject, currentChunk, processedList, ref chunkCounter, ref chunkIndex);
 
             if (currentChunk.Length > 0)
             {
-                processedList.Add($"##{chunkCounter:0000}## {currentChunk}");
+                processedList.Add($"##{chunkIndex:000}##{currentChunk}");
             }
 
             return processedList;
         }
 
-        private void ProcessJsonRecursive(JsonElement jsonObject, StringBuilder currentChunk, List<string> processedList, int chunkCounter)
+        private void ProcessJsonRecursive(JsonElement jsonObject, StringBuilder currentChunk, List<string> processedList, ref int chunkCounter, ref int chunkIndex)
         {
             if (jsonObject.ValueKind == JsonValueKind.String || jsonObject.ValueKind == JsonValueKind.Number)
             {
@@ -148,41 +136,32 @@ namespace HtmlParserLibrary
 
                 if (currentChunk.Length >= 4000)
                 {
-                    lock (processedList)
-                    {
-                        processedList.Add($"##{chunkCounter:0000}## {currentChunk.ToString()}");
-                    }
+                    processedList.Add($"##{chunkIndex:000}##{currentChunk.ToString()}");
                     currentChunk.Clear();
-                    chunkCounter++;
+                    chunkIndex++;
                 }
             }
             else if (jsonObject.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in jsonObject.EnumerateArray())
                 {
-                    var localChunk = new StringBuilder();
-                    int localCounter = Interlocked.Increment(ref chunkCounter);
-
-                    ProcessJsonRecursive(item, localChunk, processedList, localCounter);
-
-                    lock (processedList)
-                    {
-                        if (localChunk.Length > 0)
-                        {
-                            processedList.Add($"##{localCounter:0000}## {localChunk.ToString()}");
-                        }
-                    }
+                    ProcessJsonRecursive(item, currentChunk, processedList, ref chunkCounter, ref chunkIndex);
                 }
             }
             else if (jsonObject.ValueKind == JsonValueKind.Object)
             {
+                if (jsonObject.TryGetProperty("id", out JsonElement idElement))
+                {
+                    currentChunk.Append($"##{idElement.GetString()}##");
+                }
+
                 if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
                 {
                     if (contentElement.ValueKind == JsonValueKind.Array)
                     {
                         foreach (var child in contentElement.EnumerateArray())
                         {
-                            ProcessJsonRecursive(child, currentChunk, processedList, chunkCounter);
+                            ProcessJsonRecursive(child, currentChunk, processedList, ref chunkCounter, ref chunkIndex);
                         }
                     }
                     else if (contentElement.ValueKind == JsonValueKind.String || contentElement.ValueKind == JsonValueKind.Number)
@@ -191,13 +170,64 @@ namespace HtmlParserLibrary
 
                         if (currentChunk.Length >= 4000)
                         {
-                            processedList.Add($"##{chunkCounter:0000}## {currentChunk}");
+                            processedList.Add($"##{chunkIndex:000}##{currentChunk}");
                             currentChunk.Clear();
-                            chunkCounter++;
+                            chunkIndex++;
                         }
                     }
                 }
             }
+        }
+
+        public Dictionary<string, string> ParseEditedContent(string editedContent)
+        {
+            var chunks = new Dictionary<string, string>();
+            string pattern = @"##\s*(?<id>\d{5})\s*##\s*(?<content>.*?)(?=(\s*##|\s*$))";
+
+            var matches = Regex.Matches(editedContent, pattern);
+
+            foreach (Match match in matches)
+            {
+                string id = match.Groups["id"].Value;
+                string content = match.Groups["content"].Value;
+
+                chunks[id] = content;
+            }
+
+            return chunks;
+        }
+
+        public JsonObject UpdateJsonRecursive(JsonObject jsonObject, Dictionary<string, string> editedChunks, bool isRoot = false)
+        {
+            if (jsonObject.TryGetPropertyValue("id", out JsonNode idNode))
+            {
+                string id = idNode.ToString();
+
+                if (editedChunks.ContainsKey(id) && !isRoot)
+                {
+                    jsonObject["content"] = JsonValue.Create(editedChunks[id]);
+                }
+            }
+
+            if (jsonObject.TryGetPropertyValue("content", out JsonNode contentNode) && contentNode is JsonArray contentArray)
+            {
+                for (int i = 0; i < contentArray.Count; i++)
+                {
+                    if (contentArray[i] is JsonObject nestedObject)
+                    {
+                        UpdateJsonRecursive(nestedObject, editedChunks);
+                    }
+                }
+            }
+
+            return jsonObject;
+        }
+
+        public string UpdateJsonWithEditedContent(string jsonContent, Dictionary<string, string> editedChunks)
+        {
+            var jsonObject = JsonSerializer.Deserialize<JsonObject>(jsonContent);
+            var updatedJson = UpdateJsonRecursive(jsonObject, editedChunks, true);
+            return JsonSerializer.Serialize(updatedJson, new JsonSerializerOptions { WriteIndented = true });
         }
     }
 }
