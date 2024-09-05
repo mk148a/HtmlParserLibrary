@@ -14,10 +14,16 @@ namespace HtmlParserLibrary
 
         public string ConvertHtmlToJson(string htmlContent)
         {
+
             try
             {
+                // HTML içeriğini önceden işliyoruz
                 string preprocessedHtml = PreprocessHtmlForXml(htmlContent);
+
+                // HTML içeriğini tek bir kök element içine sarıyoruz
                 string wrappedHtmlContent = $"<root>{preprocessedHtml}</root>";
+
+                // XDocument ile parse ediyoruz
                 var document = XDocument.Parse(wrappedHtmlContent);
                 var rootElement = ConvertNodeToJson(document.Root);
                 JsonSerializerOptions jso = new JsonSerializerOptions();
@@ -27,6 +33,7 @@ namespace HtmlParserLibrary
             }
             catch (Exception ex)
             {
+                // XML parse hatası durumunda hatalı içeriği ham haliyle geri döndür
                 return JsonSerializer.Serialize(new
                 {
                     type = "rawHtml",
@@ -37,26 +44,52 @@ namespace HtmlParserLibrary
         }
 
         private string PreprocessHtmlForXml(string htmlContent)
-        {
+        { // Self-closing tagleri uygun formatta değiştir
             htmlContent = Regex.Replace(htmlContent, @"<(\w+)([^>]*)/>", "<$1$2></$1>");
+
+            // '&' karakterini XML uyumlu hale getiriyoruz
             htmlContent = htmlContent.Replace("&", "&amp;");
+
             return htmlContent;
         }
 
         private dynamic ConvertNodeToJson(XElement element)
         {
+            // Check if the element is editable
             var isEditable = IsEditableElement(element);
 
+            // Create a list to store content
+            var contentList = new List<dynamic>();
+
+            // Iterate through all child nodes
+            foreach (var node in element.Nodes())
+            {
+                if (node is XElement childElement)
+                {
+                    // If it's an element, recursively process it
+                    contentList.Add(ConvertNodeToJson(childElement));
+                }
+                else if (node is XText textNode)
+                {
+                    // If it's text, create a new JSON element for the text with an ID
+                    contentList.Add(new
+                    {
+                        id = (idCounter++).ToString("D5"),
+                        type = "text",
+                        isEditable = true, // Text nodes are editable
+                        content = textNode.Value
+                    });
+                }
+            }
+
+            // Create the JSON structure
             var jsonElement = new
             {
                 id = (idCounter++).ToString("D5"),
                 type = element.Name.LocalName,
                 attributes = element.Attributes().ToDictionary(attr => attr.Name.LocalName, attr => attr.Value),
                 isEditable = isEditable,
-                content = element.Nodes().Select(node =>
-                    node is XElement
-                        ? ConvertNodeToJson((XElement)node)
-                        : (object)node.ToString()).ToList()
+                content = contentList
             };
 
             return jsonElement;
@@ -84,6 +117,7 @@ namespace HtmlParserLibrary
         {
             var jsonObject = JsonSerializer.Deserialize<JsonElement>(jsonContent);
 
+            // Eğer JSON içeriği bir "root" elemanı içeriyorsa, sadece içeriğini işleyelim
             if (jsonObject.ValueKind == JsonValueKind.Object &&
                 jsonObject.TryGetProperty("type", out JsonElement typeElement) &&
                 typeElement.GetString() == "root")
@@ -91,6 +125,7 @@ namespace HtmlParserLibrary
                 if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
                 {
                     var htmlBuilder = new StringBuilder();
+                    // Sadece root'un içeriğini HTML'ye dönüştürüyoruz
                     foreach (JsonElement child in contentElement.EnumerateArray())
                     {
                         ConvertJsonToHtmlRecursive(child, htmlBuilder);
@@ -99,10 +134,11 @@ namespace HtmlParserLibrary
                 }
             }
 
+            // Eğer root elemanı yoksa normal şekilde işleme devam
             return ConvertJsonToHtmlRecursive(jsonObject, new StringBuilder());
         }
 
-        private string ConvertJsonToHtmlRecursive(JsonElement jsonObject, StringBuilder htmlBuilder)
+        public string ConvertJsonToHtmlRecursive(JsonElement jsonObject, StringBuilder htmlBuilder)
         {
             if (jsonObject.ValueKind == JsonValueKind.Object)
             {
@@ -110,6 +146,7 @@ namespace HtmlParserLibrary
                 {
                     string tagName = typeElement.GetString();
 
+                    // Eğer etiket tipi "text" ise, sadece içeriği yazdır, etiketin kendisini değil.
                     if (tagName == "text")
                     {
                         if (jsonObject.TryGetProperty("content", out JsonElement textContentElement))
@@ -157,6 +194,7 @@ namespace HtmlParserLibrary
 
             return htmlBuilder.ToString();
         }
+
 
         public List<string> ProcessJsonData(string jsonContent)
         {
@@ -241,8 +279,9 @@ namespace HtmlParserLibrary
         {
             var finalEditedContent = editedContent.Replace("# #", "##");
             var chunks = new Dictionary<string, string>();
-            string pattern = @"##\s*(?<id>\d{5})\s*##\s*(?<content>.*?)(?=(\s*##|\s*$))";
+            string pattern = @"##\s*(?<id>\d{5})\s*##\s*(?<content>.*?)(?=(\s*##|\s*$))"; // ID'leri ve içerikleri yakalamak için güncellenmiş regex
 
+            // Tüm ID'leri ve içerikleri yakala
             var matches = Regex.Matches(finalEditedContent, pattern);
 
             foreach (Match match in matches)
@@ -253,8 +292,11 @@ namespace HtmlParserLibrary
                 chunks[id] = content;
             }
 
+
             return chunks;
-        }
+
+
+        }   
 
         private JsonObject CloneJsonObject(JsonObject original)
         {
