@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
-
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -46,7 +45,6 @@ namespace HtmlParserLibrary
 
         private dynamic ConvertNodeToJson(XElement element)
         {
-
             var isEditable = IsEditableElement(element);
 
             var jsonElement = new
@@ -66,84 +64,98 @@ namespace HtmlParserLibrary
 
         private bool IsEditableElement(XElement element)
         {
-            string[] nonEditableTags = { "img", "video", "meta", "script", "style" };
+            string[] nonEditableTags = { "img", "video", "meta", "script", "style", "br", "hr" };
 
-            // If the element is in the non-editable list, return false
             if (nonEditableTags.Contains(element.Name.LocalName.ToLower()))
             {
                 return false;
             }
 
-            // Check if the element has any child elements
             bool hasChildElements = element.Elements().Any();
-
-            // If it has child elements, it's not directly editable, unless it directly contains text.
             if (hasChildElements)
             {
                 return false;
             }
 
-            // If the element has no children and contains text, it is editable
             return !string.IsNullOrWhiteSpace(element.Value);
         }
 
         public string ConvertJsonToHtml(string jsonContent)
         {
-            // Deserialize the JSON content into a JsonElement
-            jsonContent = jsonContent.Replace("&amp;", "&");
-
             var jsonObject = JsonSerializer.Deserialize<JsonElement>(jsonContent);
 
-            // Initialize a StringBuilder to construct the HTML output
-            var htmlBuilder = new StringBuilder();
+            if (jsonObject.ValueKind == JsonValueKind.Object &&
+                jsonObject.TryGetProperty("type", out JsonElement typeElement) &&
+                typeElement.GetString() == "root")
+            {
+                if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
+                {
+                    var htmlBuilder = new StringBuilder();
+                    foreach (JsonElement child in contentElement.EnumerateArray())
+                    {
+                        ConvertJsonToHtmlRecursive(child, htmlBuilder);
+                    }
+                    return Regex.Unescape(htmlBuilder.ToString());
+                }
+            }
 
-            // Recursively convert JSON back to HTML
-            ConvertJsonToHtmlRecursive(jsonObject, htmlBuilder);
-
-            // Unescape any JSON escape sequences in the final HTML string
-            string finalHtml = Regex.Unescape(htmlBuilder.ToString());
-
-            return finalHtml;
+            return ConvertJsonToHtmlRecursive(jsonObject, new StringBuilder());
         }
 
-        private void ConvertJsonToHtmlRecursive(JsonElement jsonObject, StringBuilder htmlBuilder)
+        private string ConvertJsonToHtmlRecursive(JsonElement jsonObject, StringBuilder htmlBuilder)
         {
             if (jsonObject.ValueKind == JsonValueKind.Object)
             {
                 if (jsonObject.TryGetProperty("type", out JsonElement typeElement))
                 {
                     string tagName = typeElement.GetString();
-                    htmlBuilder.Append($"<{tagName}");
 
-                    if (jsonObject.TryGetProperty("attributes", out JsonElement attributesElement))
+                    if (tagName == "text")
                     {
-                        foreach (JsonProperty attribute in attributesElement.EnumerateObject())
+                        if (jsonObject.TryGetProperty("content", out JsonElement textContentElement))
                         {
-                            htmlBuilder.Append($" {attribute.Name}=\"{attribute.Value.GetString()}\"");
+                            htmlBuilder.Append(textContentElement.GetString());
                         }
                     }
-                    htmlBuilder.Append(">");
-                    if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
+                    else
                     {
-                        if (contentElement.ValueKind == JsonValueKind.Array)
+                        htmlBuilder.Append($"<{tagName}");
+
+                        if (jsonObject.TryGetProperty("attributes", out JsonElement attributesElement))
                         {
-                            foreach (JsonElement child in contentElement.EnumerateArray())
+                            foreach (JsonProperty attribute in attributesElement.EnumerateObject())
                             {
-                                ConvertJsonToHtmlRecursive(child, htmlBuilder);
+                                htmlBuilder.Append($" {attribute.Name}=\"{attribute.Value.GetString()}\"");
                             }
                         }
-                        else if (contentElement.ValueKind == JsonValueKind.String)
+
+                        htmlBuilder.Append(">");
+
+                        if (jsonObject.TryGetProperty("content", out JsonElement contentElement))
                         {
-                            htmlBuilder.Append(contentElement.GetString());
+                            if (contentElement.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (JsonElement child in contentElement.EnumerateArray())
+                                {
+                                    ConvertJsonToHtmlRecursive(child, htmlBuilder);
+                                }
+                            }
+                            else if (contentElement.ValueKind == JsonValueKind.String)
+                            {
+                                htmlBuilder.Append(contentElement.GetString());
+                            }
                         }
+
+                        htmlBuilder.Append($"</{tagName}>");
                     }
-                    htmlBuilder.Append($"</{tagName}>");
                 }
             }
             else if (jsonObject.ValueKind == JsonValueKind.String)
             {
                 htmlBuilder.Append(jsonObject.GetString());
             }
+
+            return htmlBuilder.ToString();
         }
 
         public List<string> ProcessJsonData(string jsonContent)
@@ -229,9 +241,8 @@ namespace HtmlParserLibrary
         {
             var finalEditedContent = editedContent.Replace("# #", "##");
             var chunks = new Dictionary<string, string>();
-            string pattern = @"##\s*(?<id>\d{5})\s*##\s*(?<content>.*?)(?=(\s*##|\s*$))"; // ID'leri ve içerikleri yakalamak için güncellenmiş regex
+            string pattern = @"##\s*(?<id>\d{5})\s*##\s*(?<content>.*?)(?=(\s*##|\s*$))";
 
-            // Tüm ID'leri ve içerikleri yakala
             var matches = Regex.Matches(finalEditedContent, pattern);
 
             foreach (Match match in matches)
@@ -244,9 +255,9 @@ namespace HtmlParserLibrary
 
             return chunks;
         }
+
         private JsonObject CloneJsonObject(JsonObject original)
         {
-            // JsonObject'i JSON stringine serialize et, sonra deserialize ederek kopyala
             var jsonString = original.ToJsonString();
             return JsonNode.Parse(jsonString).AsObject();
         }
@@ -256,10 +267,14 @@ namespace HtmlParserLibrary
             {
                 string id = idNode.ToString();
 
-                // Eğer ID editedChunks içinde varsa, content'i güncelle
+                // Eğer ID editedChunks içinde varsa ve içerik boş değilse, content'i güncelle
                 if (editedChunks.ContainsKey(id) && !isRoot)
                 {
-                    jsonObject["content"] = JsonValue.Create(editedChunks[id]);
+                    var newContent = editedChunks[id];
+                    if (!string.IsNullOrEmpty(newContent))
+                    {
+                        jsonObject["content"] = JsonValue.Create(newContent);
+                    }
                 }
             }
 
